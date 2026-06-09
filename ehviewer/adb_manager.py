@@ -7,7 +7,7 @@ import platform
 from datetime import datetime
 from typing import List
 
-from .config import EXPORT_DB_DIR, DOWNLOAD_DIR
+from .config import EXPORT_DB_DIR, DOWNLOAD_DIR, PUSHED_DB_PREFIX
 
 # Windows中文系统默认GBK编码会导致解析adb(UTF-8输出)时出错, 统一指定UTF-8
 _SUBPROCESS_KWARGS = dict(
@@ -89,7 +89,17 @@ class ADBManager:
                 print("请先在手机 EhViewer 中导出数据库: 设置 → 高级 → 导出数据")
                 return False
 
-            latest_db = files[0]
+            # 优先选 EhViewer 原生导出, 跳过本工具自己推送的 ehviewer_cleaned_*.db。
+            # 否则上一次推送的 cleaned 文件会成为"最新"文件被反复拉取, 导致始终基于
+            # 旧快照操作 (而非手机当前真实状态)。
+            native = [f for f in files if not f.startswith(PUSHED_DB_PREFIX)]
+            if native:
+                latest_db = native[0]  # ls -t 已按时间倒序
+            else:
+                latest_db = files[0]
+                print("提示: 未找到 EhViewer 原生导出, 回退到最新的已清理文件")
+                print("      建议先在手机 EhViewer 中导出一次最新数据: 设置 → 高级 → 导出数据")
+
             remote_path = f"{EXPORT_DB_DIR}/{latest_db}"
 
             print(f"找到数据库: {latest_db}")
@@ -112,7 +122,7 @@ class ADBManager:
         """推送修改后的数据库到手机公共存储。"""
         try:
             timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-            filename = f"ehviewer_cleaned_{timestamp}.db"
+            filename = f"{PUSHED_DB_PREFIX}{timestamp}.db"
             remote_path = f"{EXPORT_DB_DIR}/{filename}"
 
             print(f"\n正在推送更新后的数据库到手机...")
