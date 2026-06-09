@@ -21,6 +21,7 @@ class MangaManager:
         self.db: Optional[MangaDatabase] = None
         self.temp_db_path = "temp_ehviewer.db"
         self.backup_db_path: Optional[str] = None
+        self._phone_dirs: Optional[set] = None
 
     # ------------------------------------------------------------------
     # 初始化 / 清理
@@ -50,6 +51,23 @@ class MangaManager:
                 pass
 
     # ------------------------------------------------------------------
+    # 手机目录列表 (一次性拉取并缓存, 避免逐条 adb 往返)
+    # ------------------------------------------------------------------
+
+    def get_phone_dir_set(self, refresh: bool = False) -> set:
+        """
+        返回手机下载目录中所有漫画目录名的集合 (一次 adb 调用)。
+
+        旧实现对每条数据库记录执行一次 `adb shell test -d`, 500+ 条记录
+        意味着 500+ 次 adb 往返, 耗时数分钟; 且 `test -d "$dir"` 对含 `"`
+        `$` 的目录名会出错。改为一次 `ls -1` 取全部目录名做内存集合比对,
+        既快又稳健。结果缓存, 多次分析复用。
+        """
+        if self._phone_dirs is None or refresh:
+            self._phone_dirs = set(self.adb.list_manga_dirs())
+        return self._phone_dirs
+
+    # ------------------------------------------------------------------
     # 阅读进度分析
     # ------------------------------------------------------------------
 
@@ -59,6 +77,8 @@ class MangaManager:
         """分析所有漫画的阅读进度, 返回超过阈值的列表。"""
         assert self.db is not None
         downloads = self.db.get_all_downloads()
+
+        phone_dirs = self.get_phone_dir_set()
 
         results = []
         print(f"\n开始分析 {len(downloads)} 个下载项的阅读进度...")
@@ -71,7 +91,7 @@ class MangaManager:
 
             dirname = self.db.get_download_dirname(gid) or f"{gid}-{dl['token']}"
 
-            if not self.adb.check_manga_exists(dirname):
+            if dirname not in phone_dirs:
                 print(f"  [跳过] {title} — 手机上目录不存在")
                 continue
 
@@ -193,7 +213,11 @@ class MangaManager:
             self._append_name_mapping(dest_dir, remote_dirname, local_dirname)
 
         if remove_from_phone:
-            if not self.adb.remove_manga_dir(remote_dirname):
+            if self.adb.remove_manga_dir(remote_dirname):
+                # 同步更新缓存, 使本次会话后续的失效记录扫描保持准确
+                if self._phone_dirs is not None:
+                    self._phone_dirs.discard(remote_dirname)
+            else:
                 print("  [警告] 删除手机文件失败, 请手动清理")
 
         return True
@@ -231,18 +255,25 @@ class MangaManager:
         return deleted_count
 
     def find_missing_manga(self) -> List[Dict]:
-        """查找数据库中存在但手机上不存在的漫画。"""
+        """
+        查找数据库中存在但手机上不存在的漫画 (失效记录)。
+
+        典型场景: 用户导入/恢复了一个旧的数据库备份, 其中包含的漫画早已
+        被本工具迁移走或在手机上手动删除, 导致数据库里残留大量指向不存在
+        目录的"失效记录"。本方法一次性列出手机目录做集合比对, 快速定位。
+        """
         assert self.db is not None
         downloads = self.db.get_all_downloads()
+        phone_dirs = self.get_phone_dir_set()
         missing = []
-        print(f"\n开始检查 {len(downloads)} 个下载项...")
+        print(f"\n开始检查 {len(downloads)} 个下载项 (手机现有 {len(phone_dirs)} 个目录)...")
 
         for dl in downloads:
             gid = dl["gid"]
             title = dl["title"]
             dirname = self.db.get_download_dirname(gid) or f"{gid}-{dl['token']}"
 
-            if not self.adb.check_manga_exists(dirname):
+            if dirname not in phone_dirs:
                 state_text = STATE_NAMES.get(dl["state"], "未知")
                 missing.append(
                     {
@@ -253,10 +284,8 @@ class MangaManager:
                         "state_text": state_text,
                     }
                 )
-                print(f"  [缺失] {title} (GID: {gid})")
-            else:
-                print(f"  [存在] {title}")
 
+        print(f"  发现 {len(missing)} 条失效记录 (手机上目录已不存在)")
         return missing
 
     # ------------------------------------------------------------------
