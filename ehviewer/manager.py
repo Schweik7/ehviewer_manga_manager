@@ -22,24 +22,53 @@ class MangaManager:
         self.temp_db_path = "temp_ehviewer.db"
         self.backup_db_path: Optional[str] = None
         self._phone_dirs: Optional[set] = None
+        # 当前加载的数据库来源描述 (供界面/日志显示)
+        self.loaded_db_source: Optional[str] = None
 
     # ------------------------------------------------------------------
     # 初始化 / 清理
     # ------------------------------------------------------------------
 
-    def initialize(self) -> bool:
+    def initialize(
+        self,
+        remote_db_filename: Optional[str] = None,
+        local_db_file: Optional[str] = None,
+    ) -> bool:
+        """连接设备并加载数据库。
+
+        Args:
+            remote_db_filename: 指定手机导出目录中的数据库文件名;
+                                None 时自动选最新的 EhViewer 原生导出。
+            local_db_file:      改用电脑上的本地数据库文件 (优先级高于 remote);
+                                仍需连接设备以便后续比对手机目录/迁移。
+        """
         if not self.adb.check_adb():
             return False
         if not self.adb.check_device():
             return False
-        if not self.adb.pull_exported_database(self.temp_db_path):
-            return False
+
+        if local_db_file:
+            try:
+                shutil.copy2(local_db_file, self.temp_db_path)
+            except OSError as e:
+                print(f"读取本地数据库失败: {e}")
+                return False
+            self.loaded_db_source = f"本地文件: {os.path.basename(local_db_file)}"
+            print(f"使用本地数据库文件: {local_db_file}")
+        else:
+            if not self.adb.pull_exported_database(self.temp_db_path, remote_db_filename):
+                return False
+            self.loaded_db_source = remote_db_filename or "自动(最新原生导出)"
 
         self.db = MangaDatabase(self.temp_db_path)
         if not self.db.connect():
             return False
 
         return True
+
+    def list_available_databases(self) -> List[str]:
+        """列出手机上可选的导出数据库 (供界面/CLI 让用户手动选择)。"""
+        return self.adb.list_exported_databases()
 
     def cleanup(self):
         if self.db:

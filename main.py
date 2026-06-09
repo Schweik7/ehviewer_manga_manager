@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 EhViewer漫画管理工具 - 入口
 
@@ -21,7 +20,8 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from ehviewer.config import DEFAULT_THRESHOLD, STATE_NAMES
+from ehviewer.config import DEFAULT_THRESHOLD, STATE_NAMES, EXPORT_DB_DIR, PUSHED_DB_PREFIX
+from ehviewer.adb_manager import ADBManager
 from ehviewer.manager import MangaManager
 
 
@@ -196,6 +196,32 @@ def cmd_clean(manager: MangaManager, args) -> int:
     return 0
 
 
+def cmd_list_db(args) -> int:
+    """列出手机导出目录中所有可选数据库 (不加载, 只查看)。"""
+    adb = ADBManager()
+    if not adb.check_adb() or not adb.check_device():
+        return 1
+
+    files = adb.list_exported_databases()
+    if not files:
+        print(f"\n{EXPORT_DB_DIR} 中没有数据库文件")
+        print("请先在手机 EhViewer 中导出数据库: 设置 → 高级 → 导出数据")
+        return 0
+
+    default = ADBManager.select_default_database(files)
+    print(f"\n{'='*60}")
+    print(f"{EXPORT_DB_DIR} 中的数据库 (最新在前):")
+    print(f"{'='*60}\n")
+    for f in files:
+        tag = "原生导出" if not f.startswith(PUSHED_DB_PREFIX) else "工具清理"
+        mark = "  ← 默认" if f == default else ""
+        print(f"  [{tag}] {f}{mark}")
+    print("\n用法:")
+    print("  python main.py <命令> --db-name <文件名>   # 指定手机上的某个导出")
+    print("  python main.py <命令> --db-file <本地路径>  # 使用电脑上的本地数据库")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="EhViewer漫画管理工具 - 将已读漫画从手机迁移到电脑",
@@ -213,21 +239,36 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", help="子命令")
 
+    # 公共数据库选择参数 (默认仍为最新原生导出, 可手动指定)
+    db_parent = argparse.ArgumentParser(add_help=False)
+    db_parent.add_argument(
+        "--db-name", metavar="文件名",
+        help="指定手机导出目录中的数据库文件名 (用 list-db 查看可选项); 默认最新原生导出",
+    )
+    db_parent.add_argument(
+        "--db-file", metavar="路径",
+        help="改用电脑上的本地数据库文件 (优先级高于 --db-name)",
+    )
+
+    # list-db
+    sub.add_parser("list-db", help="列出手机上可选的导出数据库")
+
     # analyze
-    p_analyze = sub.add_parser("analyze", help="分析漫画阅读进度")
+    p_analyze = sub.add_parser("analyze", help="分析漫画阅读进度", parents=[db_parent])
     p_analyze.add_argument(
         "--threshold", type=float, default=DEFAULT_THRESHOLD,
         help=f"阅读进度阈值 (默认: {DEFAULT_THRESHOLD})",
     )
 
     # check-names
-    sub.add_parser("check-names", help="预检目录名的Windows文件名兼容性 (无需连接手机)")
+    sub.add_parser("check-names", help="预检目录名的Windows文件名兼容性 (无需连接手机)",
+                   parents=[db_parent])
 
     # stats
-    sub.add_parser("stats", help="查看数据库统计信息")
+    sub.add_parser("stats", help="查看数据库统计信息", parents=[db_parent])
 
     # move
-    p_move = sub.add_parser("move", help="移动已读漫画到电脑")
+    p_move = sub.add_parser("move", help="移动已读漫画到电脑", parents=[db_parent])
     p_move.add_argument("--dest", required=True, help="目标目录路径")
     p_move.add_argument(
         "--threshold", type=float, default=DEFAULT_THRESHOLD,
@@ -255,7 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # clean
-    p_clean = sub.add_parser("clean", help="清理数据库中不存在漫画的记录")
+    p_clean = sub.add_parser("clean", help="清理数据库中不存在漫画的记录", parents=[db_parent])
     p_clean.add_argument(
         "--gids", nargs="+", type=int,
         help="要清理的漫画GID列表 (不指定则自动检测不存在的漫画)",
@@ -287,12 +328,20 @@ def main() -> int:
             parser.print_help()
             return 1
 
+    # list-db 只需列出, 无需加载数据库
+    if args.command == "list-db":
+        return cmd_list_db(args)
+
     # check-names 只需要数据库, 不需要检测手机目录
     # 但仍需初始化(拉取数据库)
     manager = MangaManager()
     try:
-        if not manager.initialize():
+        if not manager.initialize(
+            remote_db_filename=getattr(args, "db_name", None),
+            local_db_file=getattr(args, "db_file", None),
+        ):
             return 1
+        print(f"当前数据库: {manager.loaded_db_source}")
 
         dispatch = {
             "analyze": cmd_analyze,

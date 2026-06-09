@@ -68,12 +68,25 @@ class BaseWorker(QThread):
 
 
 class ConnectWorker(BaseWorker):
-    """连接设备并拉取数据库, 成功后把 manager 交回主线程。"""
+    """连接设备并拉取数据库, 成功后把 manager 交回主线程。
+
+    remote_db_filename / local_db_file 为 None 时走默认(最新原生导出);
+    指定时则加载用户手动选择的数据库。
+    """
+
+    def __init__(self, remote_db_filename=None, local_db_file=None):
+        super().__init__()
+        self.remote_db_filename = remote_db_filename
+        self.local_db_file = local_db_file
 
     def run(self):
         try:
             self._manager = MangaManager()
-            ok = self._run_with_log_capture(self._manager.initialize)
+            ok = self._run_with_log_capture(
+                lambda: self._manager.initialize(
+                    self.remote_db_filename, self.local_db_file
+                )
+            )
             if ok:
                 self.signals.finished.emit(self._manager)
             else:

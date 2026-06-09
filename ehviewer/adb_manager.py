@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import platform
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 from .config import EXPORT_DB_DIR, DOWNLOAD_DIR, PUSHED_DB_PREFIX
 
@@ -65,44 +65,62 @@ class ADBManager:
     # 数据库操作
     # ------------------------------------------------------------------
 
-    def pull_exported_database(self, local_path: str) -> bool:
-        """从手机拉取最新导出的数据库文件。"""
+    def list_exported_databases(self) -> List[str]:
+        """列出手机导出目录中的所有 .db 文件, 按修改时间倒序 (最新在前)。"""
         try:
             result = subprocess.run(
                 ["adb", "shell", "ls", "-t", EXPORT_DB_DIR],
                 **_SUBPROCESS_KWARGS,
             )
-
             if result.returncode != 0:
                 print(f"错误: 无法访问 {EXPORT_DB_DIR}")
-                print("请先在手机 EhViewer 中导出数据库: 设置 → 高级 → 导出数据")
-                return False
-
-            files = [
+                return []
+            return [
                 f.strip()
                 for f in result.stdout.split("\n")
                 if f.strip().endswith(".db")
             ]
+        except subprocess.CalledProcessError as e:
+            print(f"列出数据库失败: {e}")
+            return []
 
-            if not files:
-                print(f"错误: {EXPORT_DB_DIR} 中没有数据库文件")
-                print("请先在手机 EhViewer 中导出数据库: 设置 → 高级 → 导出数据")
-                return False
+    @staticmethod
+    def select_default_database(files: List[str]) -> Optional[str]:
+        """从文件列表中选默认数据库。
 
-            # 优先选 EhViewer 原生导出, 跳过本工具自己推送的 ehviewer_cleaned_*.db。
-            # 否则上一次推送的 cleaned 文件会成为"最新"文件被反复拉取, 导致始终基于
-            # 旧快照操作 (而非手机当前真实状态)。
-            native = [f for f in files if not f.startswith(PUSHED_DB_PREFIX)]
-            if native:
-                latest_db = native[0]  # ls -t 已按时间倒序
-            else:
-                latest_db = files[0]
-                print("提示: 未找到 EhViewer 原生导出, 回退到最新的已清理文件")
-                print("      建议先在手机 EhViewer 中导出一次最新数据: 设置 → 高级 → 导出数据")
+        优先 EhViewer 原生导出, 跳过本工具自己推送的 ehviewer_cleaned_*.db;
+        否则上一次推送的 cleaned 文件会成为"最新"文件被反复拉取, 导致始终基于
+        旧快照操作 (而非手机当前真实状态)。列表需已按时间倒序 (最新在前)。
+        """
+        if not files:
+            return None
+        native = [f for f in files if not f.startswith(PUSHED_DB_PREFIX)]
+        return native[0] if native else files[0]
 
-            remote_path = f"{EXPORT_DB_DIR}/{latest_db}"
+    def pull_exported_database(
+        self, local_path: str, remote_filename: Optional[str] = None
+    ) -> bool:
+        """从手机拉取导出的数据库文件。
 
-            print(f"找到数据库: {latest_db}")
+        Args:
+            local_path:      本地保存路径
+            remote_filename: 指定要拉取的文件名 (仅文件名, 不含目录);
+                             为 None 时自动选择最新的 EhViewer 原生导出。
+        """
+        try:
+            if remote_filename is None:
+                files = self.list_exported_databases()
+                if not files:
+                    print(f"错误: {EXPORT_DB_DIR} 中没有数据库文件")
+                    print("请先在手机 EhViewer 中导出数据库: 设置 → 高级 → 导出数据")
+                    return False
+                remote_filename = self.select_default_database(files)
+                if remote_filename.startswith(PUSHED_DB_PREFIX):
+                    print("提示: 未找到 EhViewer 原生导出, 回退到最新的已清理文件")
+                    print("      建议先在手机 EhViewer 中导出一次最新数据: 设置 → 高级 → 导出数据")
+
+            remote_path = f"{EXPORT_DB_DIR}/{remote_filename}"
+            print(f"使用数据库: {remote_filename}")
             print("正在拉取...")
 
             subprocess.run(

@@ -16,10 +16,12 @@ from PyQt5.QtWidgets import (
     QFrame,
     QMessageBox,
     QSizePolicy,
+    QDialog,
 )
 
 from ..manager import MangaManager
 from .helpers import set_bg, LogWidget
+from .db_dialog import DatabaseDialog
 from .workers import (
     ConnectWorker,
     AnalyzeWorker,
@@ -86,8 +88,13 @@ class MainWindow(QMainWindow):
             "QProgressBar::chunk{background:#3a7ab0;border-radius:7px;}"
         )
 
+        self.db_btn = QPushButton("选择数据库")
+        self.db_btn.setFixedSize(110, 32)
+        self.db_btn.setToolTip("手动选择要操作的数据库\n(手机上的某个导出, 或电脑本地文件)")
+        self.db_btn.clicked.connect(self._select_database)
+
         self.reconnect_btn = QPushButton("重连")
-        self.reconnect_btn.setFixedSize(100, 32)
+        self.reconnect_btn.setFixedSize(80, 32)
         self.reconnect_btn.setToolTip("通过 ADB 重新连接手机并拉取最新数据库")
         self.reconnect_btn.clicked.connect(self._auto_connect)
 
@@ -101,6 +108,7 @@ class MainWindow(QMainWindow):
         bar_lay.addStretch()
         bar_lay.addWidget(self.progress_bar)
         bar_lay.addSpacing(6)
+        bar_lay.addWidget(self.db_btn)
         bar_lay.addWidget(self.reconnect_btn)
         bar_lay.addWidget(help_btn)
         return bar
@@ -199,27 +207,61 @@ class MainWindow(QMainWindow):
     # ── 连接 ────────────────────────────────────────────────
 
     def _auto_connect(self):
-        self._set_busy(True, "正在连接设备并拉取数据库…")
+        """默认连接: 加载最新原生导出。"""
+        self._connect()
+
+    def _connect(self, remote_db_filename=None, local_db_file=None):
+        self._set_busy(True, "正在连接设备并加载数据库…")
         self.conn_lbl.setText("● 连接中…")
         self.conn_lbl.setStyleSheet(_LBL_YELLOW)
         if self._manager:
             self._manager.cleanup()
             self._manager = None
 
-        w = ConnectWorker()
+        w = ConnectWorker(remote_db_filename, local_db_file)
         w.signals.log.connect(self.log.append_log)
         w.signals.finished.connect(self._on_connected)
         w.signals.error.connect(self._on_connect_error)
         self._worker = w
         w.start()
 
+    def _select_database(self):
+        """弹出对话框手动选择数据库, 选定后重新加载。"""
+        if not self._manager:
+            QMessageBox.warning(
+                self, "未连接", "请先等待设备连接完成, 再选择数据库"
+            )
+            return
+        try:
+            files = self._manager.adb.list_exported_databases()
+        except Exception as e:
+            QMessageBox.warning(self, "出错", f"列出数据库失败: {e}")
+            return
+        dlg = DatabaseDialog(files, self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        choice = dlg.choice()
+        if not choice:
+            return
+        kind, value = choice
+        self.log.append_log(f"\n=== 切换数据库: {value} ===", "info")
+        if kind == "remote":
+            self._connect(remote_db_filename=value)
+        else:
+            self._connect(local_db_file=value)
+
     @pyqtSlot(object)
     def _on_connected(self, manager):
         self._manager = manager
-        self.conn_lbl.setText(f"● 已连接:  {manager.adb.device_id}")
+        src = manager.loaded_db_source or ""
+        self.conn_lbl.setText(f"● 已连接: {manager.adb.device_id}  │  {src}")
         self.conn_lbl.setStyleSheet(_LBL_GREEN)
         self._set_busy(False)
-        self.log.append_log("数据库拉取成功，可以开始操作。", "ok")
+        # 切换数据库后清空上次分析结果, 避免误用旧数据
+        self._results = []
+        self.move_tab.set_results([])
+        self.analyze_tab.populate([])
+        self.log.append_log(f"数据库加载成功 ({src})，可以开始操作。", "ok")
 
     @pyqtSlot(str)
     def _on_connect_error(self, msg):
@@ -341,6 +383,7 @@ class MainWindow(QMainWindow):
     def _set_busy(self, busy: bool, msg: str = ""):
         self.progress_bar.setVisible(busy)
         self.reconnect_btn.setEnabled(not busy)
+        self.db_btn.setEnabled(not busy)
         self.move_tab.set_busy(busy)
         self.clean_tab.set_busy(busy)
         if msg:
